@@ -16,6 +16,7 @@ using Ray.BiliBiliTool.Application.Contracts;
 using Ray.BiliBiliTool.Config.Options;
 using Ray.BiliBiliTool.DomainService.Dtos;
 using Ray.BiliBiliTool.DomainService.Interfaces;
+using Newtonsoft.Json;
 
 namespace Ray.BiliBiliTool.Application
 {
@@ -100,7 +101,7 @@ namespace Ray.BiliBiliTool.Application
                 }
 
             }
-            
+
         }
 
 
@@ -151,16 +152,19 @@ namespace Ray.BiliBiliTool.Application
             //观看任意正片内容
             taskInfo = await ViewVideo(taskInfo);
 
-            
+            //观看剧集内容
+            taskInfo = await ViewVideoNew(taskInfo);
+
+
 
             //领取购买任务
             taskInfo = await BuyVipVideo(taskInfo);
             // taskInfo = await BuyVipProduct(taskInfo);
             taskInfo = await BuyVipMall(taskInfo);
-                        
+
             taskInfo.LogInfo(_logger);
 
-            
+
         }
 
         [TaskInterceptor("测试Cookie")]
@@ -304,7 +308,7 @@ namespace Ray.BiliBiliTool.Application
                 _logger.LogInformation("开始领取任务");
                 await TryReceive(targetTask.task_code);
             }
-            
+
             _logger.LogInformation("开始完成任务");
             var re = await CompleteView(code);
 
@@ -378,7 +382,16 @@ namespace Ray.BiliBiliTool.Application
         [TaskInterceptor("观看任意正片内容", TaskLevel.Two, false)]
         private async Task<VipTaskInfo> ViewVideo(VipTaskInfo info)
         {
+            //string infoJson = JsonConvert.SerializeObject(info, Formatting.Indented);
+            //_logger.LogInformation($"...............VipTaskInfo info: {infoJson}");
             CommonTaskItem targetTask = GetTarget(info);
+
+            // 检查targetTask是否为空
+            if (targetTask == null)
+            {
+                _logger.LogInformation("观看任意正片内容 获取为空，跳过");
+                return info;
+            }
 
             // 如果状态不等于3，则做
              if (targetTask.state == 3)
@@ -408,9 +421,54 @@ namespace Ray.BiliBiliTool.Application
 
             CommonTaskItem GetTarget(VipTaskInfo info)
             {
-                return info.Task_info.Modules.First(x => x.module_title == "日常任务")
-                    .common_task_item
-                    .First(x => x.task_code == "ogvwatch");
+                return info.Task_info.Modules.FirstOrDefault(x => x.module_title == "日常任务")
+                    ?.common_task_item
+                    .FirstOrDefault(x => x.task_code == "ogvwatch");
+            }
+
+            return info;
+        }
+
+        [TaskInterceptor("观看剧集内容", TaskLevel.Two, false)]
+        private async Task<VipTaskInfo> ViewVideoNew(VipTaskInfo info)
+        {
+
+            CommonTaskItem targetTask = GetTarget(info);
+
+            // 检查targetTask是否为空
+            if (targetTask == null)
+            {
+                _logger.LogInformation("观看剧集内容 获取为空，跳过");
+                return info;
+            }
+
+            // 如果状态不等于3，则做
+             if (targetTask.state == 3)
+             {
+                 _logger.LogInformation("已完成，跳过");
+                 return info;
+             }
+
+            //0需要领取
+            if (targetTask.state == 0)
+            {
+                _logger.LogInformation("开始领取任务");
+                await TryReceive(targetTask.task_code);
+            }
+
+            _logger.LogInformation("开始完成任务");
+            _logger.LogInformation("开始观看剧集内容");
+
+            await WatchVideo();
+
+            //等待40s
+            //await Task.Delay(TimeSpan.FromSeconds(40));
+
+            CommonTaskItem GetTarget(VipTaskInfo info)
+            {
+                return info.Task_info.Modules.FirstOrDefault(x => x.module_title == "日常任务")
+                    ?.common_task_item
+                    .FirstOrDefault(x => x.task_code == "ogvwatchnew");
             }
 
             return info;
@@ -579,7 +637,7 @@ namespace Ray.BiliBiliTool.Application
             }
         }
 
-        public async Task<bool> WatchBangumi()
+        public async Task<bool> WatchBangumi(int? playedTimeParam = null)
         {
             if (_vipBigPointOptions.ViewBangumiList == null ||_vipBigPointOptions.ViewBangumiList.Count == 0)
                 return false;
@@ -593,9 +651,12 @@ namespace Ray.BiliBiliTool.Application
             }
 
             var videoInfo = res.Value.Item1;
-            
+
             // 随机播放时间
-            int playedTime = new Random().Next(905, 1800);
+            // 如果入参playedTimeParam不为空，则使用入参的播放时间
+            int playedTime = playedTimeParam ?? new Random().Next(905, 1800);
+            _logger.LogInformation($"播放时间为: {playedTime}");
+            long startTs = playedTimeParam.HasValue ? DateTime.Now.ToTimeStamp() : DateTime.Now.ToTimeStamp() - playedTime;
             // 观看该视频
             var request = new UploadVideoHeartbeatRequest()
             {
@@ -608,7 +669,7 @@ namespace Ray.BiliBiliTool.Application
                 Csrf = _biliCookie.BiliJct,
                 Type = 4,
                 Sub_type = 1,
-                Start_ts = DateTime.Now.ToTimeStamp() - playedTime,
+                Start_ts = startTs,
                 Played_time = playedTime,
                 Realtime = playedTime,
                 Real_played_time = playedTime
@@ -620,6 +681,87 @@ namespace Ray.BiliBiliTool.Application
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// 观看视频
+        /// </summary>
+        private async Task<bool> WatchVideo()
+        {
+            if (_vipBigPointOptions.ViewBangumiList == null ||_vipBigPointOptions.ViewBangumiList.Count == 0)
+                return false;
+
+            long randomSsid = _vipBigPointOptions.ViewBangumiList[new Random().Next(0,_vipBigPointOptions.ViewBangumiList.Count)];
+
+            var res = await GetBangumi(randomSsid);
+            if (res is null)
+            {
+                return false;
+            }
+
+            var videoInfo = res.Value.Item1;
+            //开始上报一次
+            await OpenVideo(videoInfo);
+
+            //模拟每秒上报，持续10分钟
+            int playedTime = 0;
+            for (int i = 0; i < 601; i++) // 600秒为10分钟
+            {
+                var request = new UploadVideoHeartbeatRequest
+                {
+                    Aid = long.Parse(videoInfo.Aid),
+                    Bvid = videoInfo.Bvid,
+                    Cid = videoInfo.Cid,
+                    Mid = long.Parse(_biliCookie.UserId),
+                    Csrf = _biliCookie.BiliJct,
+                    Played_time = playedTime,
+                    Realtime = playedTime,
+                    Real_played_time = playedTime,
+                };
+                BiliApiResponse apiResponse = await _videoApi.UploadVideoHeartbeat(request);
+                if (apiResponse.Code != 0)
+                {
+                    _logger.LogError("视频播放失败，原因：{msg}", apiResponse.Message);
+                    return false; // 如果上报失败，则退出循环
+                }
+                //await Task.Delay(1000); // 等待1秒
+                _logger.LogInformation("正在播放视频，已观看到第{playedTime}秒", playedTime);
+                playedTime++; // 增加已播放时间
+            }
+            _logger.LogInformation("视频播放成功，已观看到第{playedTime}秒", playedTime);
+            return true;
+        }
+
+        /// <summary>
+        /// 模拟打开视频播放（初始上报一次进度）
+        /// </summary>
+        /// <param name="videoInfo"></param>
+        /// <returns></returns>
+        private async Task<bool> OpenVideo(VideoInfoDto videoInfo)
+        {
+            var request = new UploadVideoHeartbeatRequest
+            {
+                Aid = long.Parse(videoInfo.Aid),
+                Bvid = videoInfo.Bvid,
+                Cid = videoInfo.Cid,
+
+                Mid = long.Parse(_biliCookie.UserId),
+                Csrf = _biliCookie.BiliJct,
+            };
+
+            //开始上报一次
+            BiliApiResponse apiResponse = await _videoApi.UploadVideoHeartbeat(request);
+
+            if (apiResponse.Code == 0)
+            {
+                _logger.LogDebug("打开视频成功");
+                return true;
+            }
+            else
+            {
+                _logger.LogError("视频打开失败，原因：{msg}", apiResponse.Message);
+                return false;
+            }
         }
 
         /// <summary>
@@ -652,7 +794,7 @@ namespace Ray.BiliBiliTool.Application
             }
             catch (Exception e)
             {
-                _logger.LogError(e.Message);   
+                _logger.LogError(e.Message);
             }
             return null;
         }

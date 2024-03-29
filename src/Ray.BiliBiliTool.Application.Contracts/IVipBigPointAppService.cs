@@ -15,7 +15,7 @@ namespace Ray.BiliBiliTool.Application.Contracts
     public interface IVipBigPointAppService : IAppService
     {
         Task VipExpress();
-        Task<bool> WatchBangumi();
+        Task<bool> WatchBangumi(int? playedTimeParam = null);
     }
 
 
